@@ -703,6 +703,28 @@ class Flask(_PackageBoundObject):
         """
         return open(os.path.join(self.instance_path, resource), mode)
 
+    def _get_templates_auto_reload(self):
+        """Reload templates when they are changed. Used by
+        :meth:`create_jinja_environment`.
+
+        This attribute can be configured with :data:`TEMPLATES_AUTO_RELOAD`. If
+        not set, it will be enabled in debug mode.
+
+        .. versionadded:: 1.0
+            This property was added but the underlying config and behavior
+            already existed.
+        """
+        rv = self.config['TEMPLATES_AUTO_RELOAD']
+        return rv if rv is not None else self.debug
+
+    def _set_templates_auto_reload(self, value):
+        self.config['TEMPLATES_AUTO_RELOAD'] = value
+
+    templates_auto_reload = property(
+        _get_templates_auto_reload, _set_templates_auto_reload
+    )
+    del _get_templates_auto_reload, _set_templates_auto_reload
+
     def create_jinja_environment(self):
         """Creates the Jinja2 environment based on :attr:`jinja_options`
         and :meth:`select_jinja_autoescape`.  Since 0.7 this also adds
@@ -715,13 +737,13 @@ class Flask(_PackageBoundObject):
            ``TEMPLATES_AUTO_RELOAD`` configuration option.
         """
         options = dict(self.jinja_options)
+
         if 'autoescape' not in options:
             options['autoescape'] = self.select_jinja_autoescape
+
         if 'auto_reload' not in options:
-            if self.config['TEMPLATES_AUTO_RELOAD'] is not None:
-                options['auto_reload'] = self.config['TEMPLATES_AUTO_RELOAD']
-            else:
-                options['auto_reload'] = self.debug
+            options['auto_reload'] = self.templates_auto_reload
+
         rv = self.jinja_environment(self, **options)
         rv.globals.update(
             url_for=url_for,
@@ -806,6 +828,22 @@ class Flask(_PackageBoundObject):
             rv.update(processor())
         return rv
 
+    def _reconfigure_for_run_debug(self, debug):
+        """The ``run`` commands will set the application's debug flag. Some
+        application configuration may already be calculated based on the
+        previous debug value. This method will recalculate affected values.
+
+        Called by the :func:`flask.cli.run` command or :meth:`Flask.run`
+        method if the debug flag is set explicitly in the call.
+
+        :param debug: the new value of the debug flag
+
+        .. versionadded:: 1.0
+            Reconfigures ``app.jinja_env.auto_reload``.
+        """
+        self.debug = debug
+        self.jinja_env.auto_reload = self.templates_auto_reload
+
     def run(self, host=None, port=None, debug=None, **options):
         """Runs the application on a local development server.
 
@@ -859,19 +897,24 @@ class Flask(_PackageBoundObject):
             explain_ignored_app_run()
             return
 
-        from werkzeug.serving import run_simple
+        if debug is not None:
+            self._reconfigure_for_run_debug(bool(debug))
+
         _host = '127.0.0.1'
         _port = 5000
         server_name = self.config.get("SERVER_NAME")
         sn_host, sn_port = None, None
+
         if server_name:
             sn_host, _, sn_port = server_name.partition(':')
+
         host = host or sn_host or _host
         port = int(port or sn_port or _port)
-        if debug is not None:
-            self.debug = bool(debug)
         options.setdefault('use_reloader', self.debug)
         options.setdefault('use_debugger', self.debug)
+
+        from werkzeug.serving import run_simple
+
         try:
             run_simple(host, port, self, **options)
         finally:
@@ -995,21 +1038,39 @@ class Flask(_PackageBoundObject):
 
     @setupmethod
     def register_blueprint(self, blueprint, **options):
-        """Registers a blueprint on the application.
+        """Register a :class:`~flask.Blueprint` on the application. Keyword
+        arguments passed to this method will override the defaults set on the
+        blueprint.
+
+        Calls the blueprint's :meth:`~flask.Blueprint.register` method after
+        recording the blueprint in the application's :attr:`blueprints`.
+
+        :param blueprint: The blueprint to register.
+        :param url_prefix: Blueprint routes will be prefixed with this.
+        :param subdomain: Blueprint routes will match on this subdomain.
+        :param url_defaults: Blueprint routes will use these default values for
+            view arguments.
+        :param options: Additional keyword arguments are passed to
+            :class:`~flask.blueprints.BlueprintSetupState`. They can be
+            accessed in :meth:`~flask.Blueprint.record` callbacks.
 
         .. versionadded:: 0.7
         """
         first_registration = False
+
         if blueprint.name in self.blueprints:
-            assert self.blueprints[blueprint.name] is blueprint, \
-                'A blueprint\'s name collision occurred between %r and ' \
-                '%r.  Both share the same name "%s".  Blueprints that ' \
-                'are created on the fly need unique names.' % \
-                (blueprint, self.blueprints[blueprint.name], blueprint.name)
+            assert self.blueprints[blueprint.name] is blueprint, (
+                'A name collision occurred between blueprints %r and %r. Both'
+                ' share the same name "%s". Blueprints that are created on the'
+                ' fly need unique names.' % (
+                    blueprint, self.blueprints[blueprint.name], blueprint.name
+                )
+            )
         else:
             self.blueprints[blueprint.name] = blueprint
             self._blueprint_order.append(blueprint)
             first_registration = True
+
         blueprint.register(self, options, first_registration)
 
     def iter_blueprints(self):
